@@ -13,8 +13,7 @@ logger = logging.getLogger(__name__)
 # Часовий пояс
 TIMEZONE = pytz.timezone('Europe/Kiev')
 
-# ID адміністратора (змініть на свій Telegram ID)
-# Щоб дізнатися свій ID, напишіть боту /start і він покаже ваш ID
+# ID адміністратора
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
 
 # Ініціалізація бази даних
@@ -64,7 +63,7 @@ def get_user_stats(user_id, days=None):
     return cursor.fetchall()
 
 def get_all_users_stats(days=None):
-    """Отримати статистику всіх користувачів (для адміна)"""
+    """Отримати статистику всіх користувачів"""
     cursor = db_conn.cursor()
     
     if days:
@@ -92,11 +91,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     welcome_message = (
         f"Привіт, {user.first_name}! 👋\n\n"
-        f"Твій Telegram ID: `{user.id}`\n\n"
-        "🕐 **Відмітка часу:**\n"
-        "• Напиши 'прийшов' - коли приходиш\n"
-        "• Напиши 'пішов' - коли йдеш\n\n"
-        "📊 **Статистика:**\n"
+        f"Твій Telegram ID: {user.id}\n\n"
+        "🕐 Відмітка часу:\n"
+        "• /come - коли приходиш на роботу\n"
+        "• /end - коли йдеш з роботи\n"
+        "• Або напиши 'прийшов' / 'пішов'\n\n"
+        "📊 Статистика:\n"
         "• /today - сьогоднішній день\n"
         "• /week - за тиждень\n"
         "• /month - за місяць\n"
@@ -104,9 +104,74 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     if user.id == ADMIN_ID:
-        welcome_message += "\n🔑 **Адмін команди:**\n• /all - статистика всіх працівників"
+        welcome_message += "\n🔑 Адмін команди:\n• /all - статистика всіх працівників"
     
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    await update.message.reply_text(welcome_message)
+
+async def come(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /come - прихід на роботу"""
+    user = update.effective_user
+    
+    current_time = datetime.now(TIMEZONE)
+    time_str = current_time.strftime('%H:%M')
+    date_str = current_time.strftime('%Y-%m-%d')
+    
+    user_name = user.first_name
+    if user.last_name:
+        user_name += f" {user.last_name}"
+    
+    user_checkins[user.id] = current_time
+    
+    cursor = db_conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO work_records (user_id, user_name, date, check_in)
+            VALUES (?, ?, ?, ?)
+        ''', (user.id, user_name, date_str, time_str))
+        db_conn.commit()
+        
+        await update.message.reply_text(f"✅ Відмічено! Прийшов о {time_str}")
+    except Exception as e:
+        logger.error(f"Помилка запису: {e}")
+        await update.message.reply_text("❌ Помилка запису.")
+
+async def end(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /end - ухід з роботи"""
+    user = update.effective_user
+    
+    if user.id not in user_checkins:
+        await update.message.reply_text("⚠️ Спочатку потрібно відмітити прихід командою /come!")
+        return
+    
+    current_time = datetime.now(TIMEZONE)
+    time_str = current_time.strftime('%H:%M')
+    date_str = current_time.strftime('%Y-%m-%d')
+    
+    checkin_time = user_checkins[user.id]
+    checkout_time = current_time
+    
+    time_diff = checkout_time - checkin_time
+    hours_worked = round(time_diff.total_seconds() / 3600, 2)
+    
+    cursor = db_conn.cursor()
+    try:
+        cursor.execute('''
+            UPDATE work_records 
+            SET check_out = ?, hours_worked = ?
+            WHERE user_id = ? AND date = ? AND check_out IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+        ''', (time_str, hours_worked, user.id, date_str))
+        db_conn.commit()
+        
+        del user_checkins[user.id]
+        await update.message.reply_text(
+            f"✅ Відмічено! Пішов о {time_str}\n"
+            f"⏱ Відпрацьовано: {hours_worked} год"
+        )
+    except Exception as e:
+        logger.error(f"Помилка оновлення: {e}")
+        await update.message.reply_text("❌ Помилка запису.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обробка повідомлень від користувачів"""
@@ -165,8 +230,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_checkins[user.id]
             await update.message.reply_text(
                 f"✅ Відмічено! Пішов о {time_str}\n"
-                f"⏱ Відпрацьовано: **{hours_worked} год**",
-                parse_mode='Markdown'
+                f"⏱ Відпрацьовано: {hours_worked} год"
             )
         except Exception as e:
             logger.error(f"Помилка оновлення: {e}")
@@ -174,9 +238,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text(
-        "🤔 Не зрозумів. Напиши:\n"
-        "• 'прийшов' або 'пішов'\n"
-        "• або використай команди: /today, /week, /stats"
+        "🤔 Не зрозумів. Використай команди:\n"
+        "• /come - прийшов\n"
+        "• /end - пішов\n"
+        "• /today, /week, /stats - статистика\n\n"
+        "Або просто напиши 'прийшов' чи 'пішов'"
     )
 
 async def today_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,7 +263,7 @@ async def today_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Сьогодні ще немає записів.")
         return
     
-    message = "📅 **Сьогодні:**\n\n"
+    message = "📅 Сьогодні:\n\n"
     total_hours = 0
     
     for check_in, check_out, hours in records:
@@ -210,9 +276,9 @@ async def today_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message += "⏳ Ще на роботі...\n\n"
     
     if total_hours > 0:
-        message += f"**Загалом сьогодні: {total_hours} год**"
+        message += f"Загалом сьогодні: {total_hours} год"
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await update.message.reply_text(message)
 
 async def week_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статистика за тиждень"""
@@ -223,7 +289,7 @@ async def week_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Записів за тиждень немає.")
         return
     
-    message = "📅 **Статистика за тиждень:**\n\n"
+    message = "📅 Статистика за тиждень:\n\n"
     total_hours = 0
     days_worked = set()
     
@@ -234,10 +300,10 @@ async def week_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             date_formatted = datetime.strptime(date, '%Y-%m-%d').strftime('%d.%m')
             message += f"• {date_formatted}: {hours} год\n"
     
-    message += f"\n**Загалом: {total_hours} год**\n"
-    message += f"**Робочих днів: {len(days_worked)}**"
+    message += f"\nЗагалом: {total_hours} год\n"
+    message += f"Робочих днів: {len(days_worked)}"
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await update.message.reply_text(message)
 
 async def month_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статистика за місяць"""
@@ -256,15 +322,15 @@ async def month_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             days_worked.add(date)
             total_hours += hours
     
-    message = f"📅 **Статистика за місяць:**\n\n"
-    message += f"⏱ Всього годин: **{total_hours} год**\n"
-    message += f"📆 Робочих днів: **{len(days_worked)}**\n"
+    message = f"📅 Статистика за місяць:\n\n"
+    message += f"⏱ Всього годин: {total_hours} год\n"
+    message += f"📆 Робочих днів: {len(days_worked)}\n"
     
     if days_worked:
         avg_hours = round(total_hours / len(days_worked), 2)
-        message += f"📊 В середньому: **{avg_hours} год/день**"
+        message += f"📊 В середньому: {avg_hours} год/день"
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await update.message.reply_text(message)
 
 async def all_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статистика за весь час"""
@@ -283,15 +349,15 @@ async def all_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             days_worked.add(date)
             total_hours += hours
     
-    message = f"📊 **Статистика за весь час:**\n\n"
-    message += f"⏱ Всього годин: **{total_hours} год**\n"
-    message += f"📆 Робочих днів: **{len(days_worked)}**\n"
+    message = f"📊 Статистика за весь час:\n\n"
+    message += f"⏱ Всього годин: {total_hours} год\n"
+    message += f"📆 Робочих днів: {len(days_worked)}\n"
     
     if days_worked:
         avg_hours = round(total_hours / len(days_worked), 2)
-        message += f"📊 В середньому: **{avg_hours} год/день**"
+        message += f"📊 В середньому: {avg_hours} год/день"
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await update.message.reply_text(message)
 
 async def admin_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статистика всіх працівників (тільки для адміна)"""
@@ -307,14 +373,14 @@ async def admin_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Немає даних.")
         return
     
-    message = "👥 **Статистика всіх працівників (30 днів):**\n\n"
+    message = "👥 Статистика всіх працівників (30 днів):\n\n"
     
     for user_name, total_hours, days in records:
         avg = round(total_hours / days, 2) if days > 0 else 0
-        message += f"👤 **{user_name}**\n"
+        message += f"👤 {user_name}\n"
         message += f"   ⏱ {total_hours} год за {days} днів (сер. {avg} год/день)\n\n"
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await update.message.reply_text(message)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обробка помилок"""
@@ -332,6 +398,8 @@ def main():
     
     # Команди
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("come", come))
+    application.add_handler(CommandHandler("end", end))
     application.add_handler(CommandHandler("today", today_stats))
     application.add_handler(CommandHandler("week", week_stats))
     application.add_handler(CommandHandler("month", month_stats))
