@@ -11,7 +11,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # Часовий пояс
-TIMEZONE = pytz.timezone('Europe/Kiev')
+TIMEZONE = pytz.timezone('Europe/Prague')
 
 # ID адміністратора
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
